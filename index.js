@@ -31,6 +31,34 @@ async function supabase(method, table, body = null, query = '') {
   return null;
 }
 
+// Load categories and rules from Supabase
+let CATS_CACHE = null;
+let RULES_CACHE = null;
+let CACHE_TIME = 0;
+
+async function getSettings() {
+  if (Date.now() - CACHE_TIME < 60000 && CATS_CACHE && RULES_CACHE) {
+    return { cats: CATS_CACHE, rules: RULES_CACHE };
+  }
+  try {
+    const rows = await supabase('GET', 'settings', null, '?select=*');
+    const cats = {};
+    let rules = [];
+    (rows || []).forEach(r => {
+      try {
+        if (r.key === 'CATS') Object.assign(cats, JSON.parse(r.value));
+        if (r.key === 'RULES') rules = JSON.parse(r.value);
+      } catch(e) {}
+    });
+    CATS_CACHE = cats;
+    RULES_CACHE = rules;
+    CACHE_TIME = Date.now();
+    return { cats, rules };
+  } catch(e) {
+    return { cats: {}, rules: [] };
+  }
+}
+
 async function askGemini(contents, retries = 3) {
   for (let i = 0; i < retries; i++) {
     try {
@@ -40,88 +68,18 @@ async function askGemini(contents, retries = 3) {
         body: JSON.stringify({ contents, generationConfig: { maxOutputTokens: 500, temperature: 0 } })
       });
       const data = await res.json();
-      console.log('Gemini status:', res.status);
       if (res.status === 429) {
         console.log(`Rate limit, aguardando ${(i+1)*3}s...`);
         await new Promise(r => setTimeout(r, (i+1)*3000));
         continue;
       }
-      const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
-      console.log('Gemini response:', text.slice(0, 200));
-      return text;
+      return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
     } catch (e) {
-      console.error('Gemini error:', e.message);
       if (i === retries - 1) throw e;
       await new Promise(r => setTimeout(r, 2000));
     }
   }
   return '';
-}
-
-// Extração de gasto sem IA — regex simples
-function extractByRegex(msg) {
-  const lower = msg.toLowerCase();
-  // Padrões: "gastei 50 de gasolina", "50 reais gasolina", "gasolina 50"
-  const patterns = [
-    /(?:gastei|paguei|comprei|uber|ifood|mercado|posto)\s+r?\$?\s*(\d+(?:[.,]\d{1,2})?)/i,
-    /r?\$?\s*(\d+(?:[.,]\d{1,2})?)\s+(?:reais|de|no|na|em)/i,
-    /(\d+(?:[.,]\d{1,2})?)\s+(?:gasolina|mercado|almoço|almoco|uber|ifood|farmacia|remedio)/i,
-  ];
-  for (const p of patterns) {
-    const m = msg.match(p);
-    if (m) {
-      const valor = parseFloat(m[1].replace(',', '.'));
-      if (valor > 0 && valor < 50000) return valor;
-    }
-  }
-  return null;
-}
-
-function categorizarRegex(msg) {
-  const lower = msg.toLowerCase();
-  if (/gasolina|posto|combustivel|abastec/.test(lower)) return 'automovel';
-  if (/mercado|supermercado|hortifruti|atacado|assai|carrefour|barbosa/.test(lower)) return 'mercado';
-  if (/uber|99|taxi|onibus|metro|transporte/.test(lower)) return 'transporte';
-  if (/farmacia|remedio|medico|consulta|hospital|saude/.test(lower)) return 'saude';
-  if (/shopee|amazon|mercadolivre|compra|loja/.test(lower)) return 'compras';
-  if (/netflix|spotify|assinatura|mensalidade/.test(lower)) return 'assinatura';
-  if (/almoco|almoço|jantar|lanche|restaurante|ifood|burger|pizza|comida/.test(lower)) return 'mercado';
-  if (/pet|veterinario|racao|petshop/.test(lower)) return 'pet';
-  if (/cinema|show|lazer|passeio/.test(lower)) return 'lazer';
-  return 'outros';
-}
-
-async function parseTransaction(msg) {
-  // Tenta regex primeiro (mais rápido e sem rate limit)
-  const valorRegex = extractByRegex(msg);
-  if (valorRegex) {
-    console.log('Regex extraiu valor:', valorRegex);
-    // Pega descrição simples
-    const desc = msg.length > 40 ? msg.slice(0, 40) : msg;
-    return {
-      encontrou: true,
-      valor: valorRegex,
-      descricao: desc,
-      categoria: categorizarRegex(msg),
-      data: new Date().toISOString().slice(0, 10)
-    };
-  }
-
-  // Fallback: tenta Gemini
-  console.log('Tentando Gemini para:', msg);
-  try {
-    const text = await askGemini([{ role: 'user', parts: [{ text:
-      `Mensagem: "${msg}"\nData: ${new Date().toISOString().slice(0,10)}\n` +
-      `Esta mensagem contém um gasto financeiro? Responda APENAS JSON:\n` +
-      `{"encontrou":true,"valor":0.00,"descricao":"texto","categoria":"mercado|automovel|compras|assinatura|saude|transporte|pet|lazer|servicos|outros","data":"YYYY-MM-DD"}\n` +
-      `Ou: {"encontrou":false}\n` +
-      `Categoria "mercado" inclui alimentação, restaurante, lanche.`
-    }] }]);
-    return JSON.parse(text.replace(/```json|```/g, '').trim());
-  } catch (e) {
-    console.error('Parse error:', e.message);
-    return { encontrou: false };
-  }
 }
 
 async function getStats() {
@@ -145,7 +103,64 @@ async function getStats() {
 }
 
 const fmt = v => 'R$ ' + Math.abs(v).toLocaleString('pt-BR', { minimumFractionDigits: 2 });
-const emojis = { mercado:'🛒', automovel:'🚗', compras:'🛍️', assinatura:'📺', saude:'💊', transporte:'🚌', pet:'🐾', lazer:'🎉', servicos:'🔧', credito:'✅', outros:'📝' };
+
+// Smart transaction parser using rules from Supabase
+async function parseTransaction(msg) {
+  const lower = msg.toLowerCase().trim();
+  const { cats, rules } = await getSettings();
+
+  // Extract value - look for numbers
+  const numMatch = msg.match(/\b(\d+(?:[.,]\d{1,2})?)\b/);
+  if (!numMatch) return { encontrou: false };
+  const valor = parseFloat(numMatch[1].replace(',', '.'));
+  if (!valor || valor <= 0 || valor > 100000) return { encontrou: false };
+
+  // Match category using rules from Supabase (longest match first)
+  let categoria = null;
+  let matchedRule = null;
+
+  // Sort rules by keyword length descending (more specific first)
+  const sortedRules = [...rules].sort((a, b) => b[0].length - a[0].length);
+  
+  for (const [kw, cat] of sortedRules) {
+    if (lower.includes(kw.toLowerCase())) {
+      categoria = cat;
+      matchedRule = kw;
+      break;
+    }
+  }
+
+  // If no rule matched, try Gemini
+  if (!categoria) {
+    const catList = Object.entries(cats).map(([id, c]) => `${id}="${(c&&c.label)||id}"`).join(', ');
+    try {
+      const text = await askGemini([{ role: 'user', parts: [{ text:
+        `Mensagem: "${msg}"\nData hoje: ${new Date().toISOString().slice(0,10)}\n` +
+        `Categorias disponíveis: ${catList||'mercado, automovel, compras, saude, transporte, outros'}\n` +
+        `Retorne APENAS JSON: {"encontrou":true,"valor":${valor},"descricao":"texto curto","categoria":"id_da_categoria","data":"${new Date().toISOString().slice(0,10)}"}\n` +
+        `Ou {"encontrou":false} se não for um gasto.`
+      }] }]);
+      const parsed = JSON.parse(text.replace(/```json|```/g,'').trim());
+      if (parsed.encontrou) return parsed;
+    } catch(e) {}
+    categoria = 'outros';
+  }
+
+  // Build description
+  const desc = lower
+    .replace(/\b\d+([.,]\d{1,2})?\b/, '')
+    .replace(/\b(reais|real|r\$|gastei|paguei|comprei)\b/gi, '')
+    .trim()
+    .replace(/\s+/g, ' ') || msg.slice(0, 40);
+
+  return {
+    encontrou: true,
+    valor,
+    descricao: desc.slice(0, 60) || msg.slice(0, 40),
+    categoria,
+    data: new Date().toISOString().slice(0, 10)
+  };
+}
 
 async function sendWhatsApp(to, message) {
   const accountSid = process.env.TWILIO_ACCOUNT_SID;
@@ -159,30 +174,27 @@ async function sendWhatsApp(to, message) {
     },
     body: new URLSearchParams({ From: from, To: to, Body: message })
   });
-  const data = await res.json();
-  console.log('WhatsApp sent:', data.sid || data.message);
-  return data;
+  return res.json();
 }
 
-// ── Rota PDF ──
+// Rota PDF
 app.post('/process-pdf', async (req, res) => {
   const { base64, cats, rules } = req.body;
   if (!base64) return res.status(400).json({ error: 'base64 obrigatório' });
-  const rulesText = (rules||[]).slice(0,30).map(r=>`"${r[0]}"→${r[1]}`).join('; ');
-  const catsText = (cats||['mercado','automovel','compras','assinatura','saude','transporte','pet','lazer','servicos','credito','outros']).join(',');
+  const rulesText = (rules||[]).slice(0,40).map(r=>`"${r[0]}"→${r[1]}`).join('; ');
+  const catsText = Object.keys(cats||{}).join(',') || 'mercado,automovel,compras,assinatura,saude,transporte,pet,lazer,servicos,credito,outros';
   try {
     const text = await askGemini([{ role: 'user', parts: [
       { inlineData: { mimeType: 'application/pdf', data: base64 } },
-      { text: `Extraia TODOS os lançamentos desta fatura incluindo créditos/estornos. Retorne APENAS JSON sem markdown:\n{"transactions":[{"date":"YYYY-MM-DD","desc":"nome","value":0.00,"holder":"titular","cat":"cat_id","parc":"N/T ou null","obs":""}]}\nCategorias: ${catsText}\nRegras: ${rulesText}\nDébito=positivo, crédito=negativo.` }
+      { text: `Extraia TODOS os lançamentos desta fatura de cartão. Retorne APENAS JSON:\n{"transactions":[{"date":"YYYY-MM-DD","desc":"nome","value":0.00,"holder":"titular","cat":"cat_id","parc":"N/T ou null","obs":""}]}\nCategorias: ${catsText}\nRegras: ${rulesText}\nDébito=positivo, crédito/estorno=negativo.` }
     ]}]);
     res.json(JSON.parse(text.replace(/```json|```/g,'').trim()));
   } catch (e) {
-    console.error('PDF error:', e.message);
     res.status(500).json({ error: e.message });
   }
 });
 
-// ── Rota Chat ──
+// Rota Chat
 app.post('/chat', async (req, res) => {
   const { message, context } = req.body;
   if (!message) return res.status(400).json({ error: 'message obrigatório' });
@@ -192,55 +204,63 @@ app.post('/chat', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ── Webhook WhatsApp ──
+// Webhook WhatsApp
 app.post('/webhook', async (req, res) => {
   res.sendStatus(200);
   const from = req.body.From;
   const body = (req.body.Body||'').trim();
   const lower = body.toLowerCase();
-  console.log(`📩 Mensagem de ${from}: "${body}"`);
+  console.log(`📩 ${from}: "${body}"`);
   if (!from || !body) return;
+
+  const { cats } = await getSettings();
+  const emojis = { mercado:'🛒', automovel:'🚗', compras:'🛍️', assinatura:'📺', saude:'💊', transporte:'🚌', pet:'🐾', lazer:'🎉', servicos:'🔧', credito:'✅', outros:'📝' };
+  function getEmoji(cat) { return emojis[cat] || '📝'; }
+  function getCatLabel(cat) { return (cats[cat]&&cats[cat].label)||cat||'outros'; }
 
   try {
     if (['ajuda','help','oi','olá','ola','menu','start'].includes(lower)) {
       await sendWhatsApp(from,
         `🤖 *Assistente Financeiro*\n\n` +
-        `💬 *Exemplos de lançamento:*\n"gastei 50 de gasolina"\n"mercado 120"\n"almoco 35 reais"\n"uber 25"\n\n` +
+        `💬 *Exemplos:*\n"30 gasolina carro"\n"20 gasolina moto"\n"mercado 120"\n"uber 25"\n"400 manutenção carro"\n\n` +
         `📊 *Consultas:*\n"resumo" — visão geral\n"saldo" — quanto sobrou\n"maiores gastos"\n"ultimo" — último lançamento`
       ); return;
     }
+
     if (lower.includes('resumo') || lower.includes('fluxo') || lower.includes('visão geral')) {
       const s = await getStats();
       await sendWhatsApp(from, `📊 *Resumo financeiro*\n\n💳 Bruto: ${fmt(s.bruto)}\n✅ Créditos: -${fmt(s.credTotal)}\n💰 Líquido: ${fmt(s.liquido)}\n\n💵 Renda: ${fmt(s.totalIn)}\n🏦 Saldo: ${fmt(s.saldo)}\n📦 Lançamentos: ${s.txCount}`);
       return;
     }
+
     if (lower.includes('saldo') || lower.includes('quanto tenho') || lower.includes('quanto sobrou')) {
       const s = await getStats();
       await sendWhatsApp(from, `${s.saldo>=0?'🟢':'🔴'} *Saldo: ${fmt(s.saldo)}*\n\n💵 Renda: ${fmt(s.totalIn)}\n💳 Fatura: ${fmt(s.liquido)}\n${s.saldo<0?'⚠️ Acima da renda!':'✅ Dentro do orçamento!'}`);
       return;
     }
+
     if (lower.includes('maiores gastos') || lower.includes('categorias') || lower.includes('onde gastei')) {
       const s = await getStats();
-      const cats = Object.entries(s.byCat).sort((a,b)=>b[1]-a[1]).slice(0,5);
-      if (!cats.length) { await sendWhatsApp(from, '📊 Nenhum gasto ainda.'); return; }
-      await sendWhatsApp(from, `📊 *Top categorias*\n\n${cats.map((c,i)=>`${i+1}. ${emojis[c[0]]||'📝'} ${c[0]}: ${fmt(c[1])}`).join('\n')}`);
+      const catsList = Object.entries(s.byCat).sort((a,b)=>b[1]-a[1]).slice(0,5);
+      if (!catsList.length) { await sendWhatsApp(from, '📊 Nenhum gasto ainda.'); return; }
+      await sendWhatsApp(from, `📊 *Top categorias*\n\n${catsList.map((c,i)=>`${i+1}. ${getEmoji(c[0])} ${getCatLabel(c[0])}: ${fmt(c[1])}`).join('\n')}`);
       return;
     }
+
     if (lower.includes('ultimo') || lower.includes('último')) {
       const tx = await supabase('GET','transactions',null,'?select=*&order=created_at.desc&limit=1');
       if (!Array.isArray(tx)||!tx.length) { await sendWhatsApp(from,'📝 Nenhum lançamento.'); return; }
       const t = tx[0];
-      await sendWhatsApp(from, `📝 *Último lançamento*\n\n${t.description}\n💰 ${fmt(t.value)}\n📂 ${t.cat}\n📅 ${t.date}\n👤 ${t.holder}`);
+      await sendWhatsApp(from, `📝 *Último lançamento*\n\n${t.description}\n💰 ${fmt(t.value)}\n📂 ${getCatLabel(t.cat)}\n📅 ${t.date}\n👤 ${t.holder}`);
       return;
     }
 
-    // Extrair gasto
     const parsed = await parseTransaction(body);
     console.log('Parsed:', JSON.stringify(parsed));
 
     if (parsed.encontrou && parsed.valor > 0) {
       const phoneLeandra = process.env.PHONE_LEANDRA || '';
-      const holder = phoneLeandra && from.includes(phoneLeandra.replace(/\D/g,'')) ? 'Leandra' : 'Thiago';
+      const holder = phoneLeandra && from.replace(/\D/g,'').includes(phoneLeandra.replace(/\D/g,'')) ? 'Leandra' : 'Thiago';
       await supabase('POST','transactions',{
         date: parsed.data,
         description: parsed.descricao,
@@ -251,12 +271,18 @@ app.post('/webhook', async (req, res) => {
         obs: `Via WhatsApp (${from})`,
         is_credit: false
       });
-      const emoji = emojis[parsed.categoria]||'📝';
+      // Invalidate cache
+      CACHE_TIME = 0;
       await sendWhatsApp(from,
-        `${emoji} *Lançado!*\n\n📝 ${parsed.descricao}\n💰 ${fmt(parsed.valor)}\n📂 ${parsed.categoria}\n📅 ${parsed.data}\n👤 ${holder}\n\n_Digite "resumo" para ver seus gastos_`
+        `${getEmoji(parsed.categoria)} *Lançado!*\n\n` +
+        `📝 ${parsed.descricao}\n` +
+        `💰 ${fmt(parsed.valor)}\n` +
+        `📂 ${getCatLabel(parsed.categoria)}\n` +
+        `📅 ${parsed.data}\n` +
+        `👤 ${holder}\n\n` +
+        `_Digite "resumo" para ver seus gastos_`
       );
     } else {
-      // IA livre
       const s = await getStats();
       let resposta = '';
       try {
