@@ -265,7 +265,7 @@ app.post('/webhook', async (req, res) => {
 
   try {
     const event = req.body;
-    console.log('📩 Webhook Evolution:', JSON.stringify(event).slice(0, 300));
+    console.log('📩 Webhook Evolution FULL:', JSON.stringify(event));
 
     // Ignorar eventos que não são mensagens recebidas
     if (event.event !== 'messages.upsert') return;
