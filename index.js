@@ -7,6 +7,9 @@ const GEMINI_KEY = process.env.GEMINI_KEY || 'AQ.Ab8RN6LVwgDeO2cuDnM6GivUOJ0Rh3S
 const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`;
 const SUPABASE_URL = process.env.SUPABASE_URL || 'https://rtnnpwzclkcipwalbhjm.supabase.co';
 const SUPABASE_KEY = process.env.SUPABASE_KEY || 'sb_publishable_b7bcdrIrWfoKt6golOQ1Iw_2y1DYkrh';
+const EVOLUTION_API_URL = process.env.EVOLUTION_API_URL || '';
+const EVOLUTION_API_KEY = process.env.EVOLUTION_API_KEY || '';
+const EVOLUTION_INSTANCE = process.env.EVOLUTION_INSTANCE || 'Personal financial';
 
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -75,15 +78,11 @@ async function askGemini(contents, retries = 3) {
   return '';
 }
 
-// ── Download mídia do Twilio ──
-async function downloadMedia(url) {
-  const accountSid = process.env.TWILIO_ACCOUNT_SID;
-  const authToken = process.env.TWILIO_AUTH_TOKEN;
-  const res = await fetch(url, {
-    headers: {
-      'Authorization': 'Basic ' + Buffer.from(`${accountSid}:${authToken}`).toString('base64')
-    }
-  });
+// ── Download mídia da Evolution API ──
+async function downloadMedia(mediaUrl) {
+  // A Evolution API retorna a mídia como base64 diretamente no webhook
+  // Esta função é usada como fallback para URLs externas
+  const res = await fetch(mediaUrl);
   if (!res.ok) throw new Error('Erro ao baixar mídia: ' + res.status);
   const buffer = await res.arrayBuffer();
   return Buffer.from(buffer).toString('base64');
@@ -146,17 +145,14 @@ async function parseByText(msg) {
 }
 
 // ── Parse áudio ──
-async function parseAudio(mediaUrl, mediaType) {
-  console.log('🎤 Processando áudio:', mediaUrl);
-  const base64 = await downloadMedia(mediaUrl);
-  const mimeType = mediaType || 'audio/ogg';
+async function parseAudio(base64, mimeType) {
   const { cats, rules } = await getSettings();
   const catList = Object.entries(cats).map(([id,c])=>`${id}="${(c&&c.label)||id}"`).join(', ');
   const sortedRules = [...rules].sort((a,b)=>b[0].length-a[0].length);
   const rulesText = sortedRules.slice(0,30).map(r=>`"${r[0]}"→${r[1]}`).join('; ');
 
   const text = await askGemini([{ role:'user', parts:[
-    { inlineData: { mimeType, data: base64 } },
+    { inlineData: { mimeType: mimeType || 'audio/ogg', data: base64 } },
     { text: `Transcreva este áudio e extraia informações de gasto financeiro.\n` +
       `Categorias disponíveis: ${catList||'mercado,automovel,compras,saude,transporte,outros'}\n` +
       `Regras de categorização (mais específicas têm prioridade): ${rulesText}\n` +
@@ -168,17 +164,14 @@ async function parseAudio(mediaUrl, mediaType) {
 }
 
 // ── Parse imagem ──
-async function parseImage(mediaUrl, mediaType) {
-  console.log('📸 Processando imagem:', mediaUrl);
-  const base64 = await downloadMedia(mediaUrl);
-  const mimeType = mediaType || 'image/jpeg';
+async function parseImage(base64, mimeType) {
   const { cats, rules } = await getSettings();
   const catList = Object.entries(cats).map(([id,c])=>`${id}="${(c&&c.label)||id}"`).join(', ');
   const sortedRules = [...rules].sort((a,b)=>b[0].length-a[0].length);
   const rulesText = sortedRules.slice(0,30).map(r=>`"${r[0]}"→${r[1]}`).join('; ');
 
   const text = await askGemini([{ role:'user', parts:[
-    { inlineData: { mimeType, data: base64 } },
+    { inlineData: { mimeType: mimeType || 'image/jpeg', data: base64 } },
     { text: `Analise esta imagem (comprovante, nota fiscal, ticket ou foto de produto/serviço) e extraia informações de gasto financeiro.\n` +
       `Categorias: ${catList||'mercado,automovel,compras,saude,transporte,outros'}\n` +
       `Regras: ${rulesText}\n` +
@@ -189,21 +182,23 @@ async function parseImage(mediaUrl, mediaType) {
   return JSON.parse(text.replace(/```json|```/g,'').trim());
 }
 
-// ── Enviar WhatsApp ──
+// ── Enviar WhatsApp via Evolution API ──
 async function sendWhatsApp(to, message) {
-  const accountSid = process.env.TWILIO_ACCOUNT_SID;
-  const authToken = process.env.TWILIO_AUTH_TOKEN;
-  const from = process.env.TWILIO_WHATSAPP_NUMBER || 'whatsapp:+14155238886';
-  const res = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`, {
+  // 'to' vem no formato '5511999999999' (apenas números)
+  const number = to.replace(/\D/g, '');
+  const res = await fetch(`${EVOLUTION_API_URL}/message/sendText/${encodeURIComponent(EVOLUTION_INSTANCE)}`, {
     method: 'POST',
     headers: {
-      'Authorization': 'Basic ' + Buffer.from(`${accountSid}:${authToken}`).toString('base64'),
-      'Content-Type': 'application/x-www-form-urlencoded'
+      'Content-Type': 'application/json',
+      'apikey': EVOLUTION_API_KEY
     },
-    body: new URLSearchParams({ From: from, To: to, Body: message })
+    body: JSON.stringify({
+      number,
+      text: message
+    })
   });
   const data = await res.json();
-  console.log('✅ Enviado:', data.sid || data.message);
+  console.log('✅ Enviado via Evolution API:', data.key?.id || JSON.stringify(data));
   return data;
 }
 
@@ -263,34 +258,69 @@ app.post('/chat', async (req, res) => {
 });
 
 // ════════════════════════════════════
-// WEBHOOK WHATSAPP
+// WEBHOOK WHATSAPP — Evolution API
 // ════════════════════════════════════
 app.post('/webhook', async (req, res) => {
   res.sendStatus(200);
-  const from = req.body.From;
-  const body = (req.body.Body||'').trim();
-  const lower = body.toLowerCase();
-  const numMedia = parseInt(req.body.NumMedia||'0');
-  const mediaUrl = req.body.MediaUrl0;
-  const mediaType = req.body.MediaContentType0||'';
-
-  console.log(`📩 ${from}: "${body}" | mídia: ${numMedia} (${mediaType})`);
-  if (!from) return;
-
-  const { cats } = await getSettings();
-  function getCatLabel(cat){ return (cats[cat]&&cats[cat].label)||cat||'outros'; }
 
   try {
+    const event = req.body;
+    console.log('📩 Webhook Evolution:', JSON.stringify(event).slice(0, 300));
+
+    // Ignorar eventos que não são mensagens recebidas
+    if (event.event !== 'messages.upsert') return;
+
+    const msg = event.data?.message;
+    if (!msg) return;
+
+    // Ignorar mensagens enviadas pelo próprio bot
+    if (msg.key?.fromMe) return;
+
+    const from = msg.key?.remoteJid?.replace('@s.whatsapp.net', '') || '';
+    if (!from) return;
+
+    // Extrair conteúdo da mensagem
+    const msgContent = msg.message || {};
+    const body = (
+      msgContent.conversation ||
+      msgContent.extendedTextMessage?.text ||
+      msgContent.imageMessage?.caption ||
+      msgContent.audioMessage?.caption ||
+      ''
+    ).trim();
+    const lower = body.toLowerCase();
+
+    // Detectar tipo de mídia
+    const isAudio = !!(msgContent.audioMessage || msgContent.pttMessage);
+    const isImage = !!(msgContent.imageMessage);
+
+    console.log(`📩 ${from}: "${body}" | áudio: ${isAudio} | imagem: ${isImage}`);
+
+    const { cats } = await getSettings();
+    function getCatLabel(cat){ return (cats[cat]&&cats[cat].label)||cat||'outros'; }
+
     // ── ÁUDIO ──
-    if (numMedia > 0 && mediaType.startsWith('audio/')) {
+    if (isAudio) {
       await sendWhatsApp(from, '🎤 Recebi seu áudio! Processando...');
       try {
-        const parsed = await parseAudio(mediaUrl, mediaType);
+        // Baixar mídia via Evolution API
+        const mediaRes = await fetch(`${EVOLUTION_API_URL}/chat/getBase64FromMediaMessage/${encodeURIComponent(EVOLUTION_INSTANCE)}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'apikey': EVOLUTION_API_KEY },
+          body: JSON.stringify({ message: msg.message, convertToMp4: false })
+        });
+        const mediaData = await mediaRes.json();
+        const base64 = mediaData.base64;
+        const mimeType = mediaData.mimetype || 'audio/ogg';
+
+        if (!base64) throw new Error('Base64 não retornado');
+
+        const parsed = await parseAudio(base64, mimeType);
         console.log('Audio parsed:', JSON.stringify(parsed));
         if (parsed.encontrou && parsed.valor > 0) {
-          const msg = await salvarTransacao(parsed, from);
+          const respMsg = await salvarTransacao(parsed, from);
           if (parsed.transcricao) await sendWhatsApp(from, `💬 _"${parsed.transcricao}"_`);
-          await sendWhatsApp(from, msg);
+          await sendWhatsApp(from, respMsg);
         } else {
           const transcricao = parsed.transcricao || 'Não foi possível transcrever';
           await sendWhatsApp(from, `💬 Transcrição: _"${transcricao}"_\n\n🤔 Não identifiquei um gasto. Tente ser mais específico, ex: "gastei 50 de gasolina"`);
@@ -303,14 +333,25 @@ app.post('/webhook', async (req, res) => {
     }
 
     // ── IMAGEM ──
-    if (numMedia > 0 && mediaType.startsWith('image/')) {
+    if (isImage) {
       await sendWhatsApp(from, '📸 Recebi a imagem! Analisando...');
       try {
-        const parsed = await parseImage(mediaUrl, mediaType);
+        const mediaRes = await fetch(`${EVOLUTION_API_URL}/chat/getBase64FromMediaMessage/${encodeURIComponent(EVOLUTION_INSTANCE)}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'apikey': EVOLUTION_API_KEY },
+          body: JSON.stringify({ message: msg.message, convertToMp4: false })
+        });
+        const mediaData = await mediaRes.json();
+        const base64 = mediaData.base64;
+        const mimeType = mediaData.mimetype || 'image/jpeg';
+
+        if (!base64) throw new Error('Base64 não retornado');
+
+        const parsed = await parseImage(base64, mimeType);
         console.log('Image parsed:', JSON.stringify(parsed));
         if (parsed.encontrou && parsed.valor > 0) {
-          const msg = await salvarTransacao(parsed, from);
-          await sendWhatsApp(from, msg);
+          const respMsg = await salvarTransacao(parsed, from);
+          await sendWhatsApp(from, respMsg);
         } else {
           await sendWhatsApp(from, '🤔 Não identifiquei um valor claro nessa imagem.\n\nTente enviar uma foto mais nítida do comprovante ou nota fiscal, ou me diga o valor em texto: "gastei R$X em Y"');
         }
@@ -385,10 +426,9 @@ app.post('/webhook', async (req, res) => {
     console.log('Text parsed:', JSON.stringify(parsed));
 
     if (parsed.encontrou && parsed.valor > 0) {
-      const msg = await salvarTransacao(parsed, from);
-      await sendWhatsApp(from, msg);
+      const respMsg = await salvarTransacao(parsed, from);
+      await sendWhatsApp(from, respMsg);
     } else {
-      // IA livre
       const s = await getStats();
       let resposta = '';
       try {
@@ -402,12 +442,11 @@ app.post('/webhook', async (req, res) => {
 
   } catch(err) {
     console.error('Webhook error:', err);
-    try { await sendWhatsApp(from, '❌ Erro temporário. Tente novamente em instantes.'); } catch(e) {}
   }
 });
 
 app.get('/', (req, res) => res.send('🤖 Bot Financeiro PRO rodando! ✅'));
-app.get('/health', (req, res) => res.json({ status:'ok', version:'PRO', time:new Date().toISOString() }));
+app.get('/health', (req, res) => res.json({ status:'ok', version:'PRO-Evolution', time:new Date().toISOString() }));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`✅ Bot PRO na porta ${PORT}`));
+app.listen(PORT, () => console.log(`✅ Bot PRO (Evolution API) na porta ${PORT}`));
