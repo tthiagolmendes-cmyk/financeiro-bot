@@ -270,18 +270,21 @@ app.post('/webhook', async (req, res) => {
     // Ignorar eventos que não são mensagens recebidas
     if (event.event !== 'messages.upsert') return;
 
-    // Ignorar notificações de status (DELIVERY, READ, etc)
-    if (event.data?.status && !event.data?.message) return;
+    // Logar evento completo para debug
+    console.log('🔍 event.event:', event.event);
+    console.log('🔍 event.data keys:', Object.keys(event.data || {}).join(','));
+    console.log('🔍 event.data.status:', event.data?.status);
+    console.log('🔍 event.data.message keys:', Object.keys(event.data?.message || {}).join(','));
 
-    // A Evolution API pode enviar a mensagem em data diretamente ou em data.message
+    // Ignorar se não tem dados
     const msg = event.data;
-    if (!msg) return;
+    if (!msg) { console.log('❌ Sem msg, ignorando'); return; }
 
     // Ignorar mensagens enviadas pelo próprio bot
-    if (msg.key?.fromMe) return;
+    if (msg.key?.fromMe) { console.log('❌ fromMe, ignorando'); return; }
 
     const from = msg.key?.remoteJid?.replace('@s.whatsapp.net', '') || '';
-    if (!from) return;
+    if (!from) { console.log('❌ Sem from, ignorando'); return; }
 
     // Extrair conteúdo da mensagem
     const msgContent = msg.message || {};
@@ -294,7 +297,13 @@ app.post('/webhook', async (req, res) => {
     ).trim();
     const lower = body.toLowerCase();
 
-    console.log(`📨 From: ${from} | Body: "${body}" | Keys: ${Object.keys(msgContent).join(',')}`);
+    console.log(`📨 From: ${from} | Body: "${body}" | Status: ${msg.status} | MsgKeys: ${Object.keys(msgContent).join(',')}`);
+
+    // Ignorar se não tem conteúdo e é só notificação de status
+    if (!body && !msgContent.audioMessage && !msgContent.pttMessage && !msgContent.imageMessage) {
+      console.log('❌ Sem conteúdo útil, ignorando');
+      return;
+    }
 
     // Detectar tipo de mídia
     const isAudio = !!(msgContent.audioMessage || msgContent.pttMessage);
