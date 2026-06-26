@@ -373,25 +373,49 @@ app.post('/webhook', async (req, res) => {
 
     if (['ajuda','help','oi','olá','ola','menu','start'].includes(lower)) {
       await sendWhatsApp(from,
-        `🤖 *Assistente Financeiro PRO*\n\n` +
-        `💬 *Texto:*\n"30 gasolina carro"\n"mercado 120 hoje"\n"uber 25"\n\n` +
-        `🎤 *Áudio:* Mande um áudio falando o gasto\n\n` +
-        `📸 *Foto:* Tire foto do comprovante\n\n` +
-        `📊 *Consultas:*\n"resumo" — visão geral do mês\n"saldo" — quanto sobrou\n"maiores gastos" — top categorias\n"ultimo" — último lançamento`
+        `💼 *Personal Finance PRO*\n` +
+        `_Seu assistente financeiro pessoal_\n\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n` +
+        `📥 *LANÇAR GASTOS*\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n` +
+        `💬 *Texto:*\n` +
+        `• "30 gasolina carro"\n` +
+        `• "mercado 120 hoje"\n` +
+        `• "uber 25"\n\n` +
+        `🎤 *Áudio:*\n` +
+        `• Envie um áudio descrevendo o gasto\n\n` +
+        `📸 *Foto/Comprovante:*\n` +
+        `• Fotografe a nota fiscal ou comprovante\n\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n` +
+        `📊 *CONSULTAS*\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n` +
+        `• */resumo* — Visão do mês (salário - gastos)\n` +
+        `• *saldo* — Quanto sobrou do orçamento\n` +
+        `• *maiores gastos* — Top 5 categorias\n` +
+        `• */parcelados* — Todas as parcelas em aberto\n` +
+        `• */ultimos* — Lançamentos das últimas 24h\n\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n` +
+        `ℹ️ *AJUDA*\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n` +
+        `• *ajuda* ou *menu* — Exibe este menu\n\n` +
+        `_Personal Finance PRO — Suas finanças sob controle_ 💼`
       ); return;
     }
 
-    if (lower.includes('resumo') || lower.includes('fluxo') || lower.includes('visão geral')) {
+    if (lower.includes('/resumo') || lower.includes('resumo') || lower.includes('fluxo') || lower.includes('visão geral')) {
       const s = await getStats();
+      const pct = s.totalIn > 0 ? ((s.liquido/s.totalIn)*100).toFixed(1) : 0;
       await sendWhatsApp(from,
-        `📊 *Resumo financeiro*\n\n` +
-        `💳 Bruto: ${fmt(s.bruto)}\n` +
-        `✅ Créditos: -${fmt(s.credTotal)}\n` +
-        `💰 Líquido: ${fmt(s.liquido)}\n\n` +
-        `💵 Renda: ${fmt(s.totalIn)}\n` +
-        `🏦 Saldo: ${fmt(s.saldo)}\n` +
-        `📦 Lançamentos: ${s.txCount}\n\n` +
-        `${s.saldo<0?'🔴 Atenção: gastos acima da renda!':'🟢 Dentro do orçamento!'}`
+        `📊 *Resumo do Mês — Personal Finance PRO*\n\n` +
+        `💵 *Receita total:* ${fmt(s.totalIn)}\n` +
+        `💳 *Gastos brutos:* ${fmt(s.bruto)}\n` +
+        `✅ *Créditos/Estornos:* -${fmt(s.credTotal)}\n` +
+        `💰 *Gastos líquidos:* ${fmt(s.liquido)}\n\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n` +
+        `🏦 *Saldo disponível: ${fmt(s.saldo)}*\n` +
+        `📈 Comprometido: ${pct}% da renda\n` +
+        `📦 Total de lançamentos: ${s.txCount}\n\n` +
+        `${s.saldo<0?'🔴 *Atenção:* Gastos acima da receita!':'🟢 Dentro do orçamento!'}`
       ); return;
     }
 
@@ -417,13 +441,55 @@ app.post('/webhook', async (req, res) => {
       ); return;
     }
 
-    if (lower.includes('ultimo') || lower.includes('último')) {
-      const tx = await supabase('GET','transactions',null,'?select=*&order=created_at.desc&limit=1');
-      if (!Array.isArray(tx)||!tx.length) { await sendWhatsApp(from,'📝 Nenhum lançamento ainda.'); return; }
-      const t = tx[0];
+    if (lower.includes('/ultimos') || lower.includes('ultimos') || lower.includes('últimos') || lower.includes('ultimo') || lower.includes('último')) {
+      const since = new Date(Date.now() - 24*60*60*1000).toISOString();
+      const tx = await supabase('GET','transactions',null,`?select=*&order=created_at.desc&created_at=gte.${since}`);
+      if (!Array.isArray(tx)||!tx.length) { await sendWhatsApp(from,'📝 Nenhum lançamento nas últimas 24 horas.'); return; }
+      const emojisH = { Thiago:'👨', Leandra:'👩' };
+      const linhas = tx.map(t =>
+        `${emojisH[t.holder]||'👤'} *${t.holder}* — ${t.description}\n` +
+        `   💰 ${fmt(t.value)} | 📂 ${getCatLabel(t.cat)} | 📅 ${t.date}`
+      ).join('\n\n');
       await sendWhatsApp(from,
-        `📝 *Último lançamento*\n\n` +
-        `${t.description}\n💰 ${fmt(t.value)}\n📂 ${getCatLabel(t.cat)}\n📅 ${t.date}\n👤 ${t.holder}`
+        `🕐 *Lançamentos — Últimas 24h*\n` +
+        `_${tx.length} registro(s) encontrado(s)_\n\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n` +
+        linhas +
+        `\n━━━━━━━━━━━━━━━━━━━━\n` +
+        `💳 *Total:* ${fmt(tx.reduce((a,t)=>a+parseFloat(t.value||0),0))}`
+      ); return;
+    }
+
+    if (lower.includes('/parcelados') || lower.includes('parcelados') || lower.includes('parcelas')) {
+      const tx = await supabase('GET','transactions',null,'?select=*&parc=not.is.null&order=description.asc');
+      const parcelados = (Array.isArray(tx)?tx:[]).filter(t => t.parc && t.parc.includes('/'));
+      if (!parcelados.length) { await sendWhatsApp(from,'✅ Nenhuma parcela em aberto no momento.'); return; }
+
+      // Agrupar por descrição para mostrar progresso
+      const grupos = {};
+      parcelados.forEach(t => {
+        const key = t.description.toLowerCase().trim();
+        if (!grupos[key]) grupos[key] = { desc: t.description, cat: t.cat, holder: t.holder, parcelas: [], value: parseFloat(t.value||0) };
+        grupos[key].parcelas.push(t.parc);
+      });
+
+      const emojisH = { Thiago:'👨', Leandra:'👩' };
+      const linhas = Object.values(grupos).map(g => {
+        const total = g.parcelas.length;
+        // Pegar última parcela para saber o total
+        const ultimaParc = g.parcelas[g.parcelas.length-1] || '?/?';
+        const [atual, totalParc] = ultimaParc.split('/');
+        const faltam = totalParc ? parseInt(totalParc) - parseInt(atual) : '?';
+        return `${emojisH[g.holder]||'👤'} *${g.desc}*\n` +
+               `   💰 ${fmt(g.value)}/parcela | 📊 ${ultimaParc} | ⏳ Faltam: ${faltam}`;
+      }).join('\n\n');
+
+      await sendWhatsApp(from,
+        `💳 *Parcelas em Aberto*\n` +
+        `_${Object.keys(grupos).length} item(s) parcelado(s)_\n\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n` +
+        linhas +
+        `\n━━━━━━━━━━━━━━━━━━━━`
       ); return;
     }
 
@@ -439,11 +505,13 @@ app.post('/webhook', async (req, res) => {
       let resposta = '';
       try {
         resposta = await askGemini([{ role:'user', parts:[{ text:
-          `Assistente financeiro do Thiago. Dados: fatura=${fmt(s.liquido)}, saldo=${fmt(s.saldo)}, renda=${fmt(s.totalIn)}.\n` +
-          `Mensagem: "${body}"\nResponda em português, direto, máx 3 linhas, use emojis.`
+          `Você é o Personal Finance PRO, assistente financeiro pessoal do Sr. Thiago. ` +
+          `Dados atuais: fatura=${fmt(s.liquido)}, saldo=${fmt(s.saldo)}, renda=${fmt(s.totalIn)}.\n` +
+          `Mensagem do Sr. Thiago: "${body}"\n` +
+          `Responda de forma formal e educada, em português, direto e objetivo, máximo 3 linhas. Use emojis.`
         }]}]);
       } catch(e) {}
-      await sendWhatsApp(from, resposta || '🤖 Não entendi. Digite *ajuda* para ver os comandos.');
+      await sendWhatsApp(from, resposta || '💼 Não compreendi sua solicitação, Sr. Thiago. Digite *ajuda* para visualizar os comandos disponíveis.');
     }
 
   } catch(err) {
