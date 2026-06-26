@@ -270,7 +270,11 @@ app.post('/webhook', async (req, res) => {
     // Ignorar eventos que não são mensagens recebidas
     if (event.event !== 'messages.upsert') return;
 
-    const msg = event.data?.message;
+    // Ignorar notificações de status (DELIVERY, READ, etc)
+    if (event.data?.status && !event.data?.message) return;
+
+    // A Evolution API pode enviar a mensagem em data diretamente ou em data.message
+    const msg = event.data;
     if (!msg) return;
 
     // Ignorar mensagens enviadas pelo próprio bot
@@ -289,6 +293,8 @@ app.post('/webhook', async (req, res) => {
       ''
     ).trim();
     const lower = body.toLowerCase();
+
+    console.log(`📨 From: ${from} | Body: "${body}" | Keys: ${Object.keys(msgContent).join(',')}`);
 
     // Detectar tipo de mídia
     const isAudio = !!(msgContent.audioMessage || msgContent.pttMessage);
